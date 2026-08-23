@@ -1,0 +1,442 @@
+import cv2
+import time
+import numpy as np
+import serial
+from ultralytics import YOLO
+import requests
+import smtplib
+from email.message import EmailMessage
+
+# ------------------- SERIAL CONNECTION TO ARDUINO -------------------
+# CHANGE THIS to your Arduino port (Mac example shown)
+ARDUINO_PORT = "/dev/cu.usbserial-110"
+BAUD_RATE = 9600
+xyz=0
+
+try:
+    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    print("✅ Arduino Connected")
+except:
+    arduino = None
+    print("⚠ Arduino NOT connected. Running in simulation mode")
+
+#-----------SEND EMAIL-------------
+def send_email(subject, body, to_email):
+
+    sender_email = "pythoncp25@gmail.com"
+    app_password = "dcvr dhlf yejb kada"
+
+    msg = EmailMessage()
+
+    msg["From"] = sender_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+
+    msg.set_content(body)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(sender_email, app_password)
+        server.send_message(msg)
+
+    print("✅ Email sent successfully")
+
+
+#------------VEHICLE DETAILS ------------
+def get_vehicle_details(vehicle_number):
+
+    url = "https://vahan.parivahan.gov.in/nrservices/?utm_source=chatgpt.com"
+
+    params = {"number": vehicle_number}
+
+    response = requests.get(url, params=params)
+
+    if response.status_code == 200:
+        return response.json()
+
+    else:
+        return {
+            "success": False,
+            "error": "Failed to fetch vehicle details"
+        }
+
+
+#--------RECEIVE DATA FROM GPS------
+def receive_gps_data():
+
+    time.sleep(1)
+
+    adr = "123.12131:121.1"
+
+    gps_data = {
+        "latitude": adr,
+        "longitude": adr,
+    }
+
+    return gps_data
+
+
+import random
+
+#-----PRINT GPS--------
+def print_location():
+
+    if(xyz):
+
+        receive_gps_data()
+
+    locations = [
+        "18°27'51.5\"N 73°52'04.3\"E",
+        "18°27'51.6\"N 73°52'05.6\"E",
+        "18°27'52.1\"N 73°52'06.1\"E"
+    ]
+
+    selected = random.choice(locations)
+
+    print("📍 Current Location:", selected)
+
+    return selected
+
+
+# ------------------- STABLE COMMAND SENDER -------------------
+last_cmd = None
+last_sent_time = 0
+
+def send_cmd(cmd):
+
+    global last_cmd, last_sent_time
+
+    # Prevent blinking/spamming
+    if cmd == last_cmd and time.time() - last_sent_time < 0.5:
+        return
+
+    if arduino:
+        arduino.write((cmd + "\n").encode())
+
+    else:
+        print("[SIM]", cmd)
+
+    last_cmd = cmd
+    last_sent_time = time.time()
+
+
+# ------------------- LOAD MODELS -------------------
+ambulance_model = YOLO("/Users/amangupta/Downloads/best.pt")
+accident_model  = YOLO("/Users/amangupta/Downloads/latestAccident (1).pt")
+vehicle_model   = YOLO("yolov8n.pt")
+
+VIDEO_SOURCE = "/Users/amangupta/Downloads/accivideo/17.mp4"
+
+CONF_THRESHOLD = 0.25
+DECISION_INTERVAL = 6
+
+MIN_GREEN = 5
+MAX_GREEN = 25
+
+flag = False
+
+
+# ------------------- GREEN TIME FUNCTION -------------------
+def get_green_time(count):
+
+    add = min(MAX_GREEN - MIN_GREEN, int(count * 1.5))
+
+    return MIN_GREEN + add
+
+
+# ------------------- MAIN PROGRAM -------------------
+def run_all():
+
+    global flag
+
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+
+    if not cap.isOpened():
+        print("❌ Cannot open camera/video")
+        return
+
+    print("\n🚦 AI Traffic Controller Started — Press 'q' to exit\n")
+
+    # Ambulance Logic
+    ambulance_detected = False
+    ambulance_start_time = None
+    ambulance_override = False
+    ambulance_lane = None
+
+    # Smart Traffic Logic
+    current_green = "TOP"
+    green_remaining = 5
+    last_switch = time.time()
+
+    while True:
+
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        h, w = frame.shape[:2]
+
+        # ------------------- DEFINE LANES -------------------
+        LANES = {
+            "TOP":    (0, 0, w, h // 3),
+            "LEFT":   (0, h // 3, w // 3, 2 * h // 3),
+            "RIGHT":  (2 * w // 3, h // 3, w, 2 * h // 3),
+            "BOTTOM": (0, 2 * h // 3, w, h)
+        }
+
+        lane_counts = {k: 0 for k in LANES}
+
+        # ===============================================================
+        # 1) AMBULANCE DETECTION
+        # ===============================================================
+        x=False
+        if(x):
+            amb_results = ambulance_model(frame, verbose=False)
+
+            found_ambulance = False
+
+            for r in amb_results:
+
+                for box in r.boxes:
+
+                    cls = int(box.cls[0])
+
+                    conf = float(box.conf[0])
+
+                    label = ambulance_model.names[cls].lower()
+
+                    if "ambulance" in label and conf > 0.5:
+
+                        found_ambulance = True
+
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                        # ===== DRAW AMBULANCE BOX =====
+                        cv2.rectangle(
+                            frame,
+                            (x1, y1),
+                            (x2, y2),
+                            (0, 255, 255),
+                            4
+                        )
+
+                        cv2.putText(
+                            frame,
+                            f"AMBULANCE {conf:.2f}",
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.9,
+                            (0, 255, 255),
+                            3
+                        )
+
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                        # Determine lane
+                        for name, (lx1, ly1, lx2, ly2) in LANES.items():
+
+                            if lx1 <= cx <= lx2 and ly1 <= cy <= ly2:
+                                ambulance_lane = name
+
+            # ------------------- AMBULANCE TIMER -------------------
+            if found_ambulance:
+
+                if not ambulance_detected:
+
+                    ambulance_detected = True
+                    ambulance_start_time = time.time()
+
+                else:
+
+                    if time.time() - ambulance_start_time > 2:
+                        ambulance_override = True
+
+            else:
+
+                ambulance_detected = False
+                ambulance_start_time = None
+                ambulance_override = False
+
+        # ===============================================================
+        # 2) ACCIDENT DETECTION
+        # ===============================================================
+        acc_results = accident_model(frame, verbose=False)
+
+        accident_detected = False
+
+        for r in acc_results:
+
+            for box in r.boxes:
+
+                label = accident_model.names[int(box.cls[0])].lower()
+
+                conf = float(box.conf[0])
+
+                if "accident" in label and conf > 0.5:
+
+                    accident_detected = True
+
+                    # ===== ACCIDENT BOX =====
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                    cv2.rectangle(
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        (0, 0, 255),
+                        4
+                    )
+
+                    cv2.putText(
+                        frame,
+                        f"ACCIDENT {conf:.2f}",
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0, 0, 255),
+                        3
+                    )
+
+        # ===============================================================
+        # 3) VEHICLE DENSITY DETECTION
+        # ===============================================================
+        veh_results = vehicle_model(frame, verbose=False)
+
+        r = veh_results[0]
+
+        if r.boxes is not None:
+
+            for box in r.boxes:
+
+                conf = float(box.conf[0])
+
+                if conf < CONF_THRESHOLD:
+                    continue
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                for name, (lx1, ly1, lx2, ly2) in LANES.items():
+
+                    if lx1 <= cx <= lx2 and ly1 <= cy <= ly2:
+
+                        lane_counts[name] += 1
+                        break
+
+        # ===============================================================
+        # TRAFFIC LIGHT DECISION LOGIC
+        # ===============================================================
+
+        if accident_detected:
+
+            send_cmd("ALL_RED")
+            send_cmd("BUZZER_ON")
+
+            if flag == False:
+
+                send_email(
+                    subject="Accident Happens ‼️ 🚨",
+                    body="vehicle owner:-Aman Gupta\nreg no.:-9234xxxx\nAlert Location => "
+                    + print_location(),
+                    to_email="bhoyarsajan66@gmail.com"
+                )
+
+            flag = True
+
+        elif ambulance_override and ambulance_lane is not None:
+
+            cmd = f"GREEN_{ambulance_lane.upper()}"
+
+            send_cmd(cmd)
+
+            current_green = ambulance_lane
+
+            flag = False
+
+        else:
+
+            flag = False
+
+            now = time.time()
+
+            if now - last_switch >= DECISION_INTERVAL or green_remaining <= 0:
+
+                current_green = max(lane_counts, key=lane_counts.get)
+
+                green_remaining = get_green_time(
+                    lane_counts[current_green]
+                )
+
+                last_switch = now
+
+            green_remaining -= 1 / 30
+
+            cmd = f"GREEN_{current_green.upper()}"
+
+            send_cmd(cmd)
+
+        # ===============================================================
+        # DRAW UI
+        # ===============================================================
+        for name, (x1, y1, x2, y2) in LANES.items():
+
+            color = (0,255,0) if name == current_green else (0,0,255)
+
+            cv2.rectangle(
+                frame,
+                (x1,y1),
+                (x2,y2),
+                color,
+                3
+            )
+
+            cv2.putText(
+                frame,
+                f"{name}: {lane_counts[name]}",
+                (x1+10, y1+30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                color,
+                2
+            )
+
+        # ------------------- STATUS TEXT -------------------
+        if ambulance_override:
+
+            cv2.putText(
+                frame,
+                "🚨 AMBULANCE PRIORITY",
+                (20, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,0,255),
+                3
+            )
+
+        if accident_detected:
+
+            cv2.putText(
+                frame,
+                "🔥 ACCIDENT DETECTED",
+                (20, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,0,255),
+                3
+            )
+
+        # ------------------- SHOW OUTPUT -------------------
+        cv2.imshow("AI Traffic Controller", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+
+    cv2.destroyAllWindows()
+
+
+# ------------------- RUN SYSTEM -------------------
+run_all()
