@@ -78,4 +78,3 @@ The system integrates **deep learning, computer vision, embedded hardware, and c
 
 ---
 
-## 📂 Project Structure
