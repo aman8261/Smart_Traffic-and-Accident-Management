@@ -1,0 +1,237 @@
+import cv2
+import time
+import numpy as np
+import serial
+from ultralytics import YOLO
+
+# ------------------- SERIAL CONNECTION TO ARDUINO -------------------
+ARDUINO_PORT = "/dev/cu.usbserial-110"
+BAUD_RATE = 9600
+
+# ================= PERFORMANCE BOOST SETTINGS =================
+FRAME_SKIP = 2          # process every 2nd frame
+RESIZE_WIDTH = 960      # lower resolution = faster
+RESIZE_HEIGHT = 540
+
+
+
+try:
+    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    print("✅ Arduino Connected")
+except:
+    arduino = None
+    print("⚠ Arduino NOT connected. Running in simulation mode")
+
+# ------------------- STABLE COMMAND SENDER -------------------
+last_cmd = None
+last_sent_time = 0
+
+def send_cmd(cmd):
+    """
+    Sends a command to Arduino BUT prevents spamming and blinking.
+    """
+    global last_cmd, last_sent_time
+
+    if cmd == last_cmd and time.time() - last_sent_time < 0.5:
+        return
+    
+    if arduino:
+        arduino.write((cmd + "\n").encode())
+    else:
+        print("[SIM]", cmd)
+
+    last_cmd = cmd
+    last_sent_time = time.time()
+
+# ------------------- LOAD MODELS -------------------
+ambulance_model = YOLO("/Users/amangupta/Downloads/best.pt")
+vehicle_model   = YOLO("yolov8n.pt")
+
+VIDEO_SOURCE = "http://192.0.0.4:8080/video"
+
+CONF_THRESHOLD = 0.25
+DECISION_INTERVAL = 6
+MIN_GREEN = 5
+MAX_GREEN = 25
+
+# ------------------- GREEN TIME FUNCTION -------------------
+def get_green_time(count):
+    add = min(MAX_GREEN - MIN_GREEN, int(count * 1.5))
+    return MIN_GREEN + add
+
+# ------------------- MAIN PROGRAM -------------------
+def run_all():
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+
+    if not cap.isOpened():
+        print("❌ Cannot open camera/video")
+        return
+
+    print("\n🚦 AI Traffic Controller Started — Press 'q' to exit\n")
+
+    # Ambulance Logic
+    ambulance_detected = False
+    ambulance_start_time = None
+    ambulance_override = False
+    ambulance_lane = None
+
+    # Smart Traffic Logic
+    current_green = "TOP"
+    green_remaining = 5
+    last_switch = time.time()
+
+    frame_count = 0
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        # Skip frames for speed
+        frame_count += 1
+        if frame_count % FRAME_SKIP != 0:
+            continue
+
+        # Resize frame for faster YOLO processing
+        frame = cv2.resize(frame, (640,480))
+
+        h, w = frame.shape[:2]
+
+        # Define 4 zones dynamically based on camera resolution
+        LANES = {
+            "TOP":    (0, 0, w, h // 3),
+            "LEFT":   (0, h // 3, w // 3, 2 * h // 3),
+            "RIGHT":  (2 * w // 3, h // 3, w, 2 * h // 3),
+            "BOTTOM": (0, 2 * h // 3, w, h)
+        }
+
+        lane_counts = {k: 0 for k in LANES}
+
+        # ===============================================================
+        # 1) AMBULANCE DETECTION
+        # ===============================================================
+        amb_results = ambulance_model(frame, verbose=False)
+        found_ambulance = False
+
+        for r in amb_results:
+            for box in r.boxes:
+                cls = int(box.cls[0])
+                conf = float(box.conf[0])
+                label = ambulance_model.names[cls].lower()
+
+                if "ambulance" in label and conf > 0.5:
+                    found_ambulance = True
+
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                    # Determine which lane
+                    for name, (lx1, ly1, lx2, ly2) in LANES.items():
+                        if lx1 <= cx <= lx2 and ly1 <= cy <= ly2:
+                            ambulance_lane = name
+
+        # ambulance timing logic
+        if found_ambulance:
+            if not ambulance_detected:
+                ambulance_detected = True
+                ambulance_start_time = time.time()
+            else:
+                if time.time() - ambulance_start_time > 2:
+                    ambulance_override = True
+        else:
+            ambulance_detected = False
+            ambulance_start_time = None
+            ambulance_override = False
+
+        # ===============================================================
+        # 2) DENSITY DETECTION
+        # ===============================================================
+        veh_results = vehicle_model(frame, verbose=False)
+        r = veh_results[0]
+
+        if r.boxes is not None:
+            for box in r.boxes:
+                conf = float(box.conf[0])
+
+                if conf < CONF_THRESHOLD:
+                    continue
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                for name, (lx1, ly1, lx2, ly2) in LANES.items():
+                    if lx1 <= cx <= lx2 and ly1 <= cy <= ly2:
+                        lane_counts[name] += 1
+                        break
+
+        # ===============================================================
+        # TRAFFIC LIGHT DECISION LOGIC
+        # ===============================================================
+        if ambulance_override and ambulance_lane is not None:
+
+            cmd = f"GREEN_{ambulance_lane.upper()}"
+            send_cmd(cmd)
+
+            current_green = ambulance_lane
+
+        else:
+            now = time.time()
+
+            if now - last_switch >= DECISION_INTERVAL or green_remaining <= 0:
+
+                current_green = max(lane_counts, key=lane_counts.get)
+
+                green_remaining = get_green_time(
+                    lane_counts[current_green]
+                )
+
+                last_switch = now
+
+            green_remaining -= 1/30
+
+            cmd = f"GREEN_{current_green.upper()}"
+            send_cmd(cmd)
+
+        # ===============================================================
+        # DRAW UI
+        # ===============================================================
+        for name, (x1, y1, x2, y2) in LANES.items():
+
+            color = (0,255,0) if name == current_green else (0,0,255)
+
+            cv2.rectangle(frame, (x1,y1),(x2,y2), color, 3)
+
+            cv2.putText(
+                frame,
+                f"{name}: {lane_counts[name]}",
+                (x1+10, y1+30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                color,
+                2
+            )
+
+        if ambulance_override:
+            cv2.putText(
+                frame,
+                "🚨 AMBULANCE PRIORITY",
+                (20, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,0,255),
+                3
+            )
+
+        cv2.imshow("AI Traffic Controller", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# ------------------- RUN SYSTEM -------------------
+run_all()
