@@ -1,0 +1,280 @@
+#include <SoftwareSerial.h>
+
+
+// GPS
+
+SoftwareSerial gpsSerial(4, 3);
+// Arduino D4 = RX  <- GPS TX
+// Arduino D3 = TX  -> GPS RX
+
+
+// GSM
+
+SoftwareSerial gsmSerial(7, 8);
+// Arduino D7 = RX  <- SIM900 TX
+// Arduino D8 = TX  -> SIM900 RX
+
+// -----------------------------
+// Configuration
+// -----------------------------
+const char PHONE_NUMBER[] = "+91XXXXXXXXXX";
+
+// Fake location used only when
+// GPS does not provide a valid fix.
+const double FAKE_LATITUDE  = 18.5204;
+const double FAKE_LONGITUDE = 73.8567;
+
+bool gpsFix = false;
+double latitude = 0.0;
+double longitude = 0.0;
+
+unsigned long lastSMS = 0;
+const unsigned long SMS_INTERVAL = 30000;
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  // USB serial is intentionally not used
+  // for displaying GPS/GSM information.
+  Serial.begin(115200);
+
+  gpsSerial.begin(9600);
+  gsmSerial.begin(9600);
+
+  delay(3000);
+
+  initializeGSM();
+}
+
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+
+  // Read GPS continuously
+  readGPS();
+
+  // Send location periodically
+  if (millis() - lastSMS >= SMS_INTERVAL) {
+
+    lastSMS = millis();
+
+    if (!gpsFix) {
+      latitude = FAKE_LATITUDE;
+      longitude = FAKE_LONGITUDE;
+    }
+
+    sendLocationSMS(latitude, longitude);
+  }
+}
+
+
+// =====================================================
+// GPS READER
+// =====================================================
+
+void readGPS() {
+
+  static String sentence = "";
+
+  while (gpsSerial.available()) {
+
+    char c = gpsSerial.read();
+
+    if (c == '\n') {
+
+      sentence.trim();
+
+      if (sentence.startsWith("$GPRMC") ||
+          sentence.startsWith("$GNRMC")) {
+
+        parseRMC(sentence);
+      }
+
+      sentence = "";
+    }
+    else {
+
+      if (c != '\r') {
+        sentence += c;
+      }
+    }
+  }
+}
+
+
+// =====================================================
+// PARSE GPRMC / GNRMC
+// =====================================================
+
+void parseRMC(String data) {
+
+  char buffer[120];
+
+  data.toCharArray(buffer, sizeof(buffer));
+
+  char *field;
+
+  char *fields[12];
+
+  int count = 0;
+
+  field = strtok(buffer, ",");
+
+  while (field != NULL && count < 12) {
+
+    fields[count++] = field;
+
+    field = strtok(NULL, ",");
+  }
+
+  // RMC format:
+  //
+  // $GPRMC,
+  // time,
+  // status,
+  // latitude,
+  // N/S,
+  // longitude,
+  // E/W,
+  // ...
+
+  if (count < 7)
+    return;
+
+  // A = valid GPS fix
+  if (fields[2][0] != 'A') {
+
+    gpsFix = false;
+    return;
+  }
+
+  double rawLat = atof(fields[3]);
+  double rawLon = atof(fields[5]);
+
+  char latDirection = fields[4][0];
+  char lonDirection = fields[6][0];
+
+  latitude = convertCoordinate(rawLat, latDirection);
+  longitude = convertCoordinate(rawLon, lonDirection);
+
+  gpsFix = true;
+}
+
+
+// =====================================================
+// NMEA COORDINATE CONVERSION
+// =====================================================
+
+double convertCoordinate(double raw, char direction) {
+
+  int degrees = (int)(raw / 100);
+
+  double minutes = raw - (degrees * 100);
+
+  double coordinate =
+      degrees + (minutes / 60.0);
+
+  if (direction == 'S' ||
+      direction == 'W') {
+
+    coordinate = -coordinate;
+  }
+
+  return coordinate;
+}
+
+
+// =====================================================
+// GSM INITIALIZATION
+// =====================================================
+
+void initializeGSM() {
+
+  gsmSerial.listen();
+
+  sendAT("AT", 1000);
+
+  sendAT("ATE0", 1000);
+
+  sendAT("AT+CMGF=1", 1000);
+
+  sendAT("AT+CSCS=\"GSM\"", 1000);
+
+  sendAT("AT+CNMI=1,2,0,0,0", 1000);
+
+  delay(1000);
+}
+
+
+// =====================================================
+// SEND LOCATION SMS
+// =====================================================
+
+void sendLocationSMS(double lat, double lon) {
+
+  gsmSerial.listen();
+
+  // Start SMS
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(PHONE_NUMBER);
+  gsmSerial.println("\"");
+
+  delay(1500);
+
+  // Message
+  gsmSerial.println("Emergency Location");
+
+  gsmSerial.println();
+
+  gsmSerial.print("Latitude: ");
+  gsmSerial.println(lat, 6);
+
+  gsmSerial.print("Longitude: ");
+  gsmSerial.println(lon, 6);
+
+  gsmSerial.println();
+
+  gsmSerial.print("Location: ");
+
+  gsmSerial.print("https://maps.google.com/?q=");
+  gsmSerial.print(lat, 6);
+  gsmSerial.print(",");
+  gsmSerial.println(lon, 6);
+
+  // End SMS
+  gsmSerial.write(26);
+
+  // Wait for GSM network
+  delay(5000);
+}
+
+
+// =====================================================
+// AT COMMAND HELPER
+// =====================================================
+
+void sendAT(const char *command,
+            unsigned long waitTime) {
+
+  gsmSerial.listen();
+
+  gsmSerial.println(command);
+
+  unsigned long start = millis();
+
+  while (millis() - start < waitTime) {
+
+    while (gsmSerial.available()) {
+
+      // Read response but DO NOT print it
+      gsmSerial.read();
+    }
+  }
+}
