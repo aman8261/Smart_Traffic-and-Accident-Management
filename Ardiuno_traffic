@@ -1,0 +1,113 @@
+// ---------------- PIN SETUP ----------------
+//#include <SoftwareSerial.h>//gps
+int BUZZER = A0;
+
+int gptx = A0;
+int pgrx = A1;
+
+int R_TOP = 2;
+int G_TOP = 4;
+
+int R_LEFT = 5;
+int G_LEFT = 7;
+
+int R_RIGHT = 8;
+int G_RIGHT = 10;
+
+int R_BOTTOM = 11;
+int G_BOTTOM = 13;
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("GPS Module Initializing...");
+
+  
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
+
+  pinMode(R_TOP, OUTPUT);
+  pinMode(G_TOP, OUTPUT);
+
+  pinMode(R_LEFT, OUTPUT);
+  pinMode(G_LEFT, OUTPUT);
+
+  pinMode(R_RIGHT, OUTPUT);
+  pinMode(G_RIGHT, OUTPUT);
+
+  pinMode(R_BOTTOM, OUTPUT);
+  pinMode(G_BOTTOM, OUTPUT);
+
+  allRed();   // Start with all RED
+}
+//gps
+// void gps() {
+//   while (gpsSerial.available()) {
+//     Serial.send(gpsSerial.read());
+//   }
+// }
+
+// ---------------- BUZZER ----------------
+void buzzerOn() {
+  digitalWrite(BUZZER, HIGH);
+  delay(800);
+  digitalWrite(BUZZER, LOW);
+}
+
+void buzzerOff() {
+  digitalWrite(BUZZER, LOW);
+}
+
+// ---------------- LIGHT CONTROL ----------------
+void allRed() {
+  digitalWrite(R_TOP, HIGH);
+  digitalWrite(G_TOP, LOW);
+
+  digitalWrite(R_LEFT, HIGH);
+  digitalWrite(G_LEFT, LOW);
+
+  digitalWrite(R_RIGHT, HIGH);
+  digitalWrite(G_RIGHT, LOW);
+
+  digitalWrite(R_BOTTOM, HIGH);
+  digitalWrite(G_BOTTOM, LOW);
+}
+
+void greenTop() {
+  allRed();
+  digitalWrite(G_TOP, HIGH);
+  digitalWrite(R_TOP, LOW);
+}
+
+void greenBottom() {
+  allRed();
+  digitalWrite(G_BOTTOM, HIGH);
+  digitalWrite(R_BOTTOM, LOW);
+}
+
+void greenLeft() {
+  allRed();
+  digitalWrite(G_LEFT, HIGH);
+  digitalWrite(R_LEFT, LOW);
+}
+
+void greenRight() {
+  allRed();
+  digitalWrite(G_RIGHT, HIGH);
+  digitalWrite(R_RIGHT, LOW);
+}
+
+// ---------------- MAIN LOOP ----------------
+void loop() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "GREEN_TOP") greenTop();
+    else if (cmd == "GREEN_BOTTOM") greenBottom();
+    else if (cmd == "GREEN_LEFT") greenLeft();
+    else if (cmd == "GREEN_RIGHT") greenRight();
+    else if (cmd == "ALL_RED")    allRed();
+    else if (cmd == "BUZZER_ON")  buzzerOn();
+    Serial.print("Executed: ");
+    Serial.println(cmd);
+  }
+}
